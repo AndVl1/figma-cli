@@ -1,0 +1,13 @@
+{
+  "name": "figma-cli",
+  "version": "0.1.0",
+  "description": "Rust CLI binary for Figma API access — token-efficient alternative to figma-console-mcp. Use for scripting, CI/CD automation, and batch design token processing.",
+  "author": {
+    "name": "AndVl1",
+    "url": "https://github.com/AndVl1"
+  },
+  "homepage": "https://github.com/AndVl1/figma-cli",
+  "repository": "https://github.com/AndVl1/figma-cli",
+  "license": "MIT",
+  "keywords": ["figma", "cli", "design-system", "rust", "automation"]
+}
