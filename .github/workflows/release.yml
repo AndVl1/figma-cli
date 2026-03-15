@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: figma-cli-aarch64-apple-darwin.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: figma-cli-x86_64-apple-darwin.tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: figma-cli-x86_64-unknown-linux-gnu.tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: figma-cli-aarch64-unknown-linux-gnu.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf "../../../${{ matrix.archive }}" figma-cli
+          cd -
+          echo "SHA256=$(shasum -a 256 ${{ matrix.archive }} | cut -d ' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Compute checksums
+        run: |
+          for f in figma-cli-*.tar.gz; do
+            sha256sum "$f" >> checksums.txt
+          done
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            figma-cli-*.tar.gz
+            checksums.txt
+          generate_release_notes: true
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Compute SHA256 for macOS bottles
+        run: |
+          echo "SHA_ARM=$(shasum -a 256 figma-cli-aarch64-apple-darwin.tar.gz | cut -d ' ' -f1)" >> "$GITHUB_ENV"
+          echo "SHA_X86=$(shasum -a 256 figma-cli-x86_64-apple-darwin.tar.gz | cut -d ' ' -f1)" >> "$GITHUB_ENV"
+          echo "SHA_LINUX=$(shasum -a 256 figma-cli-x86_64-unknown-linux-gnu.tar.gz | cut -d ' ' -f1)" >> "$GITHUB_ENV"
+          echo "SHA_LINUX_ARM=$(shasum -a 256 figma-cli-aarch64-unknown-linux-gnu.tar.gz | cut -d ' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Update tap formula
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          script: |
+            const version = context.ref.replace('refs/tags/v', '');
+            const tag = context.ref.replace('refs/tags/', '');
+            const base = `https://github.com/AndVl1/figma-cli/releases/download/${tag}`;
+
+            const formula = `class FigmaCli < Formula
+              desc "Rust CLI for Figma API — token-efficient alternative to figma-console-mcp"
+              homepage "https://github.com/AndVl1/figma-cli"
+              version "${version}"
+              license "MIT"
+
+              on_macos do
+                on_arm do
+                  url "${base}/figma-cli-aarch64-apple-darwin.tar.gz"
+                  sha256 "${{ env.SHA_ARM }}"
+                end
+                on_intel do
+                  url "${base}/figma-cli-x86_64-apple-darwin.tar.gz"
+                  sha256 "${{ env.SHA_X86 }}"
+                end
+              end
+
+              on_linux do
+                on_arm do
+                  url "${base}/figma-cli-aarch64-unknown-linux-gnu.tar.gz"
+                  sha256 "${{ env.SHA_LINUX_ARM }}"
+                end
+                on_intel do
+                  url "${base}/figma-cli-x86_64-unknown-linux-gnu.tar.gz"
+                  sha256 "${{ env.SHA_LINUX }}"
+                end
+              end
+
+              def install
+                bin.install "figma-cli"
+              end
+
+              test do
+                assert_match "figma-cli", shell_output("#{bin}/figma-cli --version")
+              end
+            end
+            `;
+
+            // Get current file SHA for update
+            let fileSha;
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner: 'AndVl1',
+                repo: 'homebrew-tap',
+                path: 'Formula/figma-cli.rb',
+              });
+              fileSha = data.sha;
+            } catch (e) {
+              fileSha = undefined; // file doesn't exist yet
+            }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: 'AndVl1',
+              repo: 'homebrew-tap',
+              path: 'Formula/figma-cli.rb',
+              message: `chore: update figma-cli to ${version}`,
+              content: Buffer.from(formula).toString('base64'),
+              sha: fileSha,
+            });
